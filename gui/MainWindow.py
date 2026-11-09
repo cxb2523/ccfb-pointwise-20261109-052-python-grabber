@@ -185,6 +185,7 @@ class MainWindow:
         self.master.wait_window(input_dialog.top)
         if input_dialog.result:
             try:
+                self.grabber.set_grayscale(input_dialog.get_grayscale())
                 self.grabber.start_recording(input_dialog.get_audio_device_index(),
                                              input_dialog.get_video_compressor_index(),
                                              input_dialog.get_audio_compressor_index(),

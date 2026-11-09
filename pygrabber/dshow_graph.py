@@ -44,6 +44,7 @@ from pygrabber.dshow_core import (IBASEFILTER, ICAPTUREGRAPHBUILDER2, IFILTERGRA
                                   IAMStreamConfig, ICaptureGraphBuilder2, ICreateDevEnum, ISampleGrabber,
                                   ISpecifyPropertyPages, IVideoWindow, qedit, quartz)
 from pygrabber.dshow_ids import DeviceCategories, MediaSubtypes, MediaTypes, PinCategory, clsids, FormatTypes, subtypes
+from pygrabber.filters import row_stride, to_grayscale
 from pygrabber.moniker import IMONIKER
 from pygrabber.win_api_extra import LPUNKNOWN, WS_CHILD, WS_CLIPSIBLINGS, OleCreatePropertyFrame
 from pygrabber.windows_media import IWMPROFILE, IWMProfileManager2, WMCreateProfileManager
@@ -236,8 +237,15 @@ class SampleGrabber(Filter):
         bmp_header = p_video_info_header.contents.bmi_header
         return bmp_header.biWidth, bmp_header.biHeight
 
+    def get_bits_per_pixel(self) -> int:
+        media_type = self.sample_grabber.GetConnectedMediaType()
+        p_video_info_header = cast(media_type.pbFormat, POINTER(VIDEOINFOHEADER))
+        bmp_header = p_video_info_header.contents.bmi_header
+        return bmp_header.biBitCount
+
     def initialize_after_connection(self):
         self.callback.image_resolution = self.get_resolution()
+        self.callback.image_bpp = self.get_bits_per_pixel()
 
 
 class SmartTee(Filter):
@@ -360,6 +368,9 @@ class FilterGraph:
         self.filters: FiltersDict = {}
         self.recording_format = None
         self.is_recording = False
+        # Survives graph rebuilds (preview -> recording): a newly created
+        # SampleGrabber picks this state up in add_sample_grabber.
+        self.grayscale_enabled = False
 
     def __add_filter(self, filter_type: FilterType, filter_id: int | None):
         assert filter_type not in self.filters
@@ -383,6 +394,7 @@ class FilterGraph:
         self.__add_filter(FilterType.sample_grabber, None)
         sample_grabber = self.filters[FilterType.sample_grabber]
         sample_grabber_cb = SampleGrabberCallback(callback)
+        sample_grabber_cb.grayscale_enabled = self.grayscale_enabled
         sample_grabber.set_callback(sample_grabber_cb, 1)
         sample_grabber.set_media_type(MediaTypes.Video, MediaSubtypes.RGB24)
 
@@ -517,6 +529,18 @@ class FilterGraph:
         else:
             return False
 
+    def set_grayscale(self, enabled: bool):
+        # Only a plain boolean attribute is touched, so the toggle is safe to
+        # call from the UI thread while the DirectShow stream thread is running:
+        # no graph stop/rebuild and no lock. The stream thread snapshots the
+        # flag once per frame in SampleGrabberCallback.BufferCB.
+        self.grayscale_enabled = bool(enabled)
+        if FilterType.sample_grabber in self.filters:
+            self.filters[FilterType.sample_grabber].callback.grayscale_enabled = self.grayscale_enabled
+
+    def is_grayscale_enabled(self) -> bool:
+        return self.grayscale_enabled
+
     def get_input_device(self) -> VideoInput:
         return self.filters[FilterType.video_input]
 
@@ -600,6 +624,14 @@ class SampleGrabberCallback(COMObject):
         self.cnt = 0
         self.keep_photo = False
         self.image_resolution: tuple[int, int] = (0, 0)
+        # The real bit depth is pushed in by SampleGrabber.initialize_after_connection
+        # once the pins are connected; RGB24 is the media type requested at setup.
+        self.image_bpp = 24
+        # Written from the UI thread through FilterGraph.set_grayscale and read
+        # on the DirectShow stream thread below. A plain bool assignment needs no
+        # lock; BufferCB snapshots it once per frame so a toggle can never leave a
+        # single frame half color, half grayscale.
+        self.grayscale_enabled = False
         super(SampleGrabberCallback, self).__init__()
 
     def grab_frame(self):
@@ -611,21 +643,30 @@ class SampleGrabberCallback(COMObject):
     def BufferCB(self, this, SampleTime, pBuffer: NPBUFFER, BufferLen: int) -> int:
         if self.keep_photo:
             self.keep_photo = False
-            img = np.ctypeslib.as_array(pBuffer, shape=(self.image_resolution[1], self.image_resolution[0], 3))
-            img = np.flip(np.copy(img), axis=0)
+            width, height = self.image_resolution
+            # Snapshot the shared state once: everything below uses these locals,
+            # so an in-flight frame is computed entirely with one mode.
+            grayscale = self.grayscale_enabled
+            bits_per_pixel = self.image_bpp
+            channels = bits_per_pixel // 8
+            stride = row_stride(width, bits_per_pixel)
+            buffer = np.ctypeslib.as_array(pBuffer, shape=(BufferLen,))
+            rows = buffer[:height * stride].reshape(height, stride)
+
+            if grayscale:
+                # to_grayscale reads only the valid pixels, leaves stride padding
+                # untouched and returns a fresh (height, width, 3) uint8 image.
+                img = to_grayscale(rows, width, height, bits_per_pixel)
+            else:
+                # Slice off the row padding before reshaping: width * 3 is not a
+                # multiple of 4 for odd widths, so a plain reshape would fold the
+                # padding bytes into the pixels.
+                img = np.copy(rows[:, :width * channels]).reshape(height, width, channels)
+                if channels == 4:  # RGB32: drop the unused fourth byte, keep BGR
+                    img = img[:, :, :3]
+                img = np.flip(img, axis=0)
             self.callback(img)
         return 0
-
-    # ALTERNATIVE
-    # def BufferCB(self, this, SampleTime, pBuffer, BufferLen):
-    #     if self.keep_photo:
-    #         self.keep_photo = False
-    #         bsize = self.image_resolution[1] *self.image_resolution[0] * 3
-    #         img = pBuffer[:bsize]
-    #         img = np.reshape(img, (self.image_resolution[1], self.image_resolution[0], 3))
-    #         img = np.flip(img, axis=0)
-    #         self.callback(img)
-    #     return 0
 
 
 def get_moniker_name(moniker: IMONIKER) -> str:

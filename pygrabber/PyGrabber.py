@@ -109,6 +109,11 @@ class PyGrabber:
     def grab_frame(self):
         self.graph.grab_frame()
 
+    def set_grayscale(self, enabled: bool):
+        # Takes effect on the next frame without stopping or rebuilding the
+        # graph; the stream thread snapshots the flag at the start of each frame.
+        self.graph.set_grayscale(enabled)
+
     def get_status(self):
         graph_state = self.graph.get_state()
         device_name = self.graph.get_input_device().Name

@@ -42,12 +42,14 @@ class ConfigureRecording:
         self.video_compressor_index = None
         self.audio_compressor_index = None
         self.asf_profile = None
+        self.grayscale = BooleanVar()
+        self.grayscale.set(False)
         self.result = None
 
         top = self.top = Toplevel(parent)
         top.attributes("-toolwindow", 1)
         top.attributes("-topmost", 1)
-        top.geometry("500x290")
+        top.geometry("500x325")
         top.resizable(False, False)
 
         self.lbl_title = Label(top, text='Choose recording options:')
@@ -108,6 +110,10 @@ class ConfigureRecording:
         self.input_asf_profile = ttk.Combobox(master=self.content, width=tblen2, values=asf_profiles, state='readonly')
         self.input_asf_profile.grid(row=5, column=1, padx=5, pady=5, sticky=W, columnspan=2)
 
+        self.chk_grayscale = Checkbutton(self.content, text="Grayscale (capture frames already converted, no post-processing)",
+                                         variable=self.grayscale)
+        self.chk_grayscale.grid(row=6, column=1, padx=5, pady=5, sticky=W, columnspan=2)
+
         self.submitButton = Button(self.commands, text='Ok', width=10, command=self.send)
         self.submitButton.grid(row=0, column=0, padx=5, pady=5)
 
@@ -159,6 +165,9 @@ class ConfigureRecording:
 
     def get_filename(self):
         return self.filename.get()
+
+    def get_grayscale(self):
+        return self.grayscale.get()
 
     def get_asf_profile(self):
         return self.input_asf_profile_index
